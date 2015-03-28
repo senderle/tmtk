@@ -101,7 +101,7 @@ def parse_metadata(open_md_file):
             fields = [f.strip() for f in line.split('\t')]
             yield zip(fieldnames, fields)
 
-def shared_topic_add_metadata(comp, open_md_file):
+def add_text_metadata(comp, open_md_file):
     '''Accepts a dictionary of document dictionaries (as created by
     parse_composition_file()) and extends each of them with metadata from 
     a tab-delimited csv file. The first column of the metadata file is
@@ -113,9 +113,25 @@ def shared_topic_add_metadata(comp, open_md_file):
     the name of the second column.'''
     
     for row in parse_metadata(open_md_file):
+        _, docid = row[0]
+        if docid in comp:
+            comp[docid].update(row[1:])
+
+def load_topic_metadata(topic_md_file):
+    topic_md_map = {}
+    for row in parse_metadata(topic_md_file):
         _, tid = row[0]
-        if tid in comp:
-            comp[tid].update(row[1:])
+        tid = int(tid)
+        topic_md_map[tid] = dict(row[1:])
+    return topic_md_map
+
+def load_and_filter_texts(compfile, parser_rex, metadata, filters):
+    texts = parse_composition_file(compfile, parser_rex)
+    if metadata is not None:
+        add_text_metadata(texts, metadata)
+    if filters is not None:
+        texts = filter_texts(texts, filters)
+    return texts
 
 def shared_topic_top_texts(texts, topics, n):
     ordered = sorted(texts)
@@ -124,18 +140,37 @@ def shared_topic_top_texts(texts, topics, n):
     proportions_texts = sorted(zip(multiplied, ordered), reverse=True)[0:n]
     return proportions_texts
 
-def shared_topic_parse_data(compfile, metadata, parser_rex):
-    texts = parse_composition_file(compfile, parser_rex)
-    if args.metadata_file is not None:
-        shared_topic_add_metadata(texts, metadata)
-    return texts
-
 def shared_topic_controller(args):
-    texts = shared_topic_parse_data(args.composition_file,
-                                    args.metadata_file, 
-                                    args.parser_rex)
-    top = shared_topic_top_texts(texts, args.topic_num, args.num_texts)
-    shared_topic_view(texts, top, args.metadata_field)
+    texts = load_and_filter_texts(args.composition_file,
+                                  args.parser_rex,
+                                  args.document_metadata,
+                                  args.metadata_filter)
+    
+    if args.topic_metadata is not None:
+        topic_md = load_topic_metadata(args.topic_metadata)
+
+    if args.each_topic:
+        for tn in args.topic_num:
+            top = shared_topic_top_texts(texts, [tn], args.num_texts)
+            print
+            print "Topic {}".format(tn),
+            if tn in topic_md and 'name' in topic_md[tn]:
+                print ": {}".format(topic_md[tn]['name'])
+            else:
+                print
+
+            shared_topic_view(texts, top, args.metadata_field)
+    else:
+        msg = "Top texts for topics {}:"
+        print
+        print msg.format(', '.join(map(str, args.topic_num)))
+        if all(tn in topic_md for tn in args.topic_num):
+            msg = '\t{}.'
+            topic_names = (topic_md[tn]['name'] for tn in args.topic_num)
+            print msg.format(', '.join(topic_names))
+            print
+        top = shared_topic_top_texts(texts, args.topic_num, args.num_texts)
+        shared_topic_view(texts, top, args.metadata_field)
 
 def shared_topic_view(texts, top, fields=None):
     fields = [] if fields is None else fields
@@ -159,16 +194,30 @@ def construct_doc_topic_matrix(texts):
 def is_symmetric(mat, eps=2 ** -12):
     return (numpy.abs(mat - mat.T) < eps).all()
 
-def topic_graph_add_metadata(graph, open_md_file):
-    for row in parse_metadata(open_md_file):
-        _, tid = row[0]
-        tid = int(tid)
+def create_text_filter(filters):
+    def text_filter(item):
+        for key, value in filters:
+            if (   key not in item
+                or str(item[key]) != value):
+                return False
+        return True
+    return text_filter
+
+def filter_texts(texts, filters):
+    text_filter = create_text_filter(filters)
+    return {key:texts[key] for key in texts if text_filter(texts[key])}
+
+def topic_graph_add_metadata(graph, topic_md):
+    for tid in topic_md:
         if tid < len(graph.node) and tid >= 0:
-            graph.node[tid].update(row[1:])
+            graph.node[tid].update(topic_md[tid])
 
 def topic_graph_controller(args):
-    texts = parse_composition_file(args.composition_file)
-
+    texts = load_and_filter_texts(args.composition_file,
+                                  args.parser_rex,
+                                  args.document_metadata,
+                                  args.metadata_filter)
+    
     # Construct similarity matrix
     DTM = construct_doc_topic_matrix(texts)
     sim_func = similarity_dispatcher[args.similarity_function]
@@ -192,16 +241,14 @@ def topic_graph_controller(args):
     # row index _to_ its column index. So here we transpose. 
     graph = graph_cons(sim_matrix.T)
     
-    if args.metadata_file is not None:
-        topic_graph_add_metadata(graph, args.metadata_file)
-    
-    if args.write_network_file is not None:
-        filename = args.write_network_file
-        topic_graph_save(graph, filename, args.output_type)
-    
+    if args.topic_metadata is not None:
+        topic_md = load_topic_metadata(args.topic_metadata)
+        topic_graph_add_metadata(graph, topic_md)
+
     if args.calculate_centrality:
         centrality = eigenvector_centrality(sim_matrix)
-        topic_graph_view_centrality(centrality)
+
+        topic_graph_view_centrality(graph, centrality, ['name'])
         
         # Sanity check against nx.eigenvector_centrality.
         # This seems to fail when there are unlinked nodes; networkx's power
@@ -214,6 +261,10 @@ def topic_graph_controller(args):
         #nx_centrality /= nx_centrality.sum()
         #assert (numpy.abs(nx_centrality - centrality) < 2 ** -12).all()
 
+    if args.write_network_file is not None:
+        filename = args.write_network_file
+        topic_graph_save(graph, filename, args.output_type)
+ 
 def topic_graph_save(graph, filename, filetype):
     n_edges = len(graph.edges())
     n_nodes = len(graph.nodes())
@@ -233,11 +284,21 @@ def topic_graph_save(graph, filename, filetype):
         with open(filename, 'w') as gfile:
             json.dump(data, gfile)
 
-def topic_graph_view_centrality(centrality):
+def topic_graph_view_centrality(graph, centrality, fields):
+    if fields is None:
+        fields = []
     centrality = ((cval, i) for i, cval in enumerate(centrality))
     centrality = sorted(centrality, reverse=True)
     for rank, (val, topic) in enumerate(centrality):
-        print rank, ':', topic, val
+        msg = '{:4} : {:4}' + '  {}' * (len(fields) + 1)
+        data = [rank, topic]
+        graph_node_topic = graph.node[topic]
+        data.extend([graph_node_topic[field] 
+                        if field in graph_node_topic else 
+                     ''
+                        for field in fields])
+        data.append(val)
+        print msg.format(*data)
 
 def cosine_similarity(A, B):
     '''A normed dot product, vectorized. If A has n rows, B should
@@ -326,7 +387,8 @@ def browsing_similarity(A, B):
     return numpy.dot(A, B) / norm
 
 similarity_dispatcher = { 'cosine'   : cosine_similarity,
-                          'browsing' : browsing_similarity }
+                          'browsing' : browsing_similarity,
+                          'default'  : browsing_similarity }
 
 def remove_self_loops(sim_matrix):
     sim_matrix = sim_matrix.copy()
@@ -383,7 +445,8 @@ def rank_threshold(threshold_rank, sim_matrix):
 
 threshold_dispatcher = { 'rank'      : rank_threshold,
                          'underwood' : underwood_threshold,
-                         'flat'      : flat_threshold }
+                         'flat'      : flat_threshold,
+                         'default'   : flat_threshold }
 
 def eigenvector_centrality(sim_matrix):
     pi_eig = numpy.ones((sim_matrix.shape[0], 1))
@@ -407,15 +470,33 @@ if __name__ == '__main__':
     
     parent_parser = argparse.ArgumentParser(description='Parse a MALLET '
         'composition file.')
-    parent_parser.add_argument('-m', '--metadata-file', 
+    parent_parser.add_argument('-m', '--document-metadata', 
         metavar='filename', type=FileType('r'),
-        help='A file containing metadata in a tab-delimited table, with '
-        'the relevant (document or topic) id in the first column. If '
+        help='A file containing document metadata in a tab-delimited table, '
+        'with the relevant document id in the first column. If '
         'the first row starts with a `#` symbol, its entries will be treated '
         'as column names.')
+    parent_parser.add_argument('-M', '--topic-metadata', metavar='filename',
+        type=FileType('r'), help='A file containing topic metadata in a '
+        'tab-delimited table, with the relevant topic id in the first '
+        'column. If the first row starts with a `#` symbol, its entries '
+        'will be treated as column names.')
     parent_parser.add_argument('-f', '--metadata-field', type=str, 
         action='append', metavar='field-name', help='A metadata field to '
         'include in the output. May be used multiple times.')
+    parent_parser.add_argument('-F', '--metadata-filter', type=str,
+        action='append', nargs=2, metavar='field-name/value', 
+        help='A metadata field to use for filtering input. Only items with '
+        'fields set to the given values will be included.')
+    parent_parser.add_argument('-r', '--parser-rex', type=str,
+        metavar='regular-expression', help='A regular expression for '
+        'extracting metadata from filenames as listed in the MALLET '
+        'composition file. Only named groups will be captured. For example, '
+        'the named group `(?P<year>\d\d\d\d)` will capture a four-digit '
+        'sequence and associate it with the key `year`. To use a customized '
+        'file id in the first column of your metadata file, create a group '
+        'named `docid`.')
+
     parent_parser.add_argument('composition_file', type=FileType('r'),
         help='A composition file produced by MALLET (via the '
         '--output-doc-topics option).')
@@ -427,17 +508,13 @@ if __name__ == '__main__':
         parents=[parent_parser], conflict_handler='resolve')
     sim_parser.add_argument('-n', '--num-texts', type=int, default=20, 
         metavar='number', help='The number of texts to display.')
-    sim_parser.add_argument('-r', '--parser-rex', type=str,
-        metavar='regular-expression', help='A regular expression for '
-        'extracting metadata from filenames as listed in the MALLET '
-        'composition file. Only named groups will be captured. For example, '
-        'the named group `(?P<year>\d\d\d\d)` will capture a four-digit '
-        'sequence and associate it with the key `year`. To use a customized '
-        'file id in the first column of your metadata file, create a group '
-        'named `docid`.')
     sim_parser.add_argument('topic_num', type=int, nargs='+', help='A list of '
         'topics to compare, specified by the topic number assigned by '
         'MALLET.')
+    sim_parser.add_argument('-e', '--each-topic', action='store_true',
+        default=False, help='Rather than printing out texts shared between '
+        'the given topics, print out the top texts for each given topic '
+        'in sequence.')
     sim_parser.set_defaults(func=shared_topic_controller)
 
     graph_parser = subparsers.add_parser('network', parents=[parent_parser],
@@ -457,18 +534,19 @@ if __name__ == '__main__':
         'the --write-network-file option is not selected.')
 
     graph_parser.add_argument('-s', '--similarity-function',
-        choices=['cosine', 'browsing'], type=str,
-        default='browsing', help='The similarity function '
+        choices=similarity_dispatcher.keys(), type=str,
+        default='default', help='The similarity function '
         'to use. The `cosine` option uses standard cosine similarity; the '
         '`browsing` option uses a modified cosine similarity formula: '
         '`dot(a, b) / norm` where `norm` is not the product of the euclidean '
         'norms of `a` and `b`, but is instead the manhattan norm of `b`. '
         'The result of this last option is a matrix of topic transition '
-        'probabilities that corresponds to a reversible markov chain.')
+        'probabilities that corresponds to a reversible markov chain. The '
+        'default value is `browsing`.')
     
     graph_parser.add_argument('-t', '--threshold-function', 
-        choices=['flat', 'rank', 'underwood'], type=str, 
-        default='flat', help='The threshold function '
+        choices=threshold_dispatcher.keys(), type=str, 
+        default='default', help='The threshold function '
         'to use for link-cutting. The `flat` option uses a simple value '
         'threshold. Any link in the network with weight below this value '
         'will be cut. The `underwood` option uses a link-cutting heuristic '
@@ -481,7 +559,8 @@ if __name__ == '__main__':
         'The `rank` option uses a rank threshold; all links with rank below '
         'this value will be cut, and every node will have precisely this '
         'many links. Ranks start at 1, so the highest-ranked link is given '
-        'rank 1, the next-highest-ranked link is given rank 2, and so on.')
+        'rank 1, the next-highest-ranked link is given rank 2, and so on. '
+        'The default value is `flat`.')
     graph_parser.add_argument('-v', '--threshold-value', type=float, 
         default=0.0, metavar='number', help='The threshold to set for the '
         'selected `--threshold-function`. A threshold of 0 preserves all '
