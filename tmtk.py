@@ -34,7 +34,7 @@ class FileType(object):
         try:
             return open(string, self._mode, self._bufsize)
         except IOError as e:
-            message = _("can't open '%s': %s")
+            message = "can't open '%s': %s"
             raise ArgumentTypeError(message % (string, e))
 
     def __repr__(self):
@@ -93,7 +93,7 @@ def parse_metadata(open_md_file):
         if firstline[0] == '#':
             fieldnames = firstline[1:].split('\t')
         else:
-            fieldnames = ['field_' + str(n) for n, _ in
+            fieldnames = ['field_' + str(n) for n, _x in
                           enumerate(firstline.split('\t'))]
             md = itertools.chain((firstline,), md)
     
@@ -113,14 +113,14 @@ def add_text_metadata(comp, open_md_file):
     the name of the second column.'''
     
     for row in parse_metadata(open_md_file):
-        _, docid = row[0]
+        _x, docid = row[0]
         if docid in comp:
             comp[docid].update(row[1:])
 
 def load_topic_metadata(topic_md_file):
     topic_md_map = {}
     for row in parse_metadata(topic_md_file):
-        _, tid = row[0]
+        _x, tid = row[0]
         tid = int(tid)
         topic_md_map[tid] = dict(row[1:])
     return topic_md_map
@@ -380,7 +380,7 @@ def browsing_similarity(A, B):
     elif B.ndim == 1:
         B = B[:,None]
     elif A.ndim > 2 or B.ndim > 2:
-        raise ValueError('cosine_similarity is undefined for 3-dimensional '
+        raise ValueError('browsing_similarity is undefined for 3-dimensional '
                          'arrays and higher')
     
     norm = B.sum(axis=0)[None,:]
