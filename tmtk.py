@@ -34,8 +34,8 @@ class FileType(object):
         try:
             return open(string, self._mode, self._bufsize)
         except IOError as e:
-            message = "can't open '%s': %s"
-            raise ArgumentTypeError(message % (string, e))
+            message = argparse._("can't open '%s': %s")
+            raise argparse.ArgumentTypeError(message % (string, e))
 
     def __repr__(self):
         args = self._mode, self._bufsize
