@@ -212,6 +212,13 @@ def topic_graph_add_metadata(graph, topic_md):
         if tid < len(graph.node) and tid >= 0:
             graph.node[tid].update(topic_md[tid])
 
+def topic_graph_nx_convert(sim_matrix):
+    if is_symmetric(sim_matrix):
+        graph = networkx.Graph
+    else:
+        graph = networkx.DiGraph
+    return graph
+
 def topic_graph_controller(args):
     texts = load_and_filter_texts(args.composition_file,
                                   args.parser_rex,
@@ -243,11 +250,13 @@ def topic_graph_controller(args):
     
     if args.topic_metadata is not None:
         topic_md = load_topic_metadata(args.topic_metadata)
-        topic_graph_add_metadata(graph, topic_md)
+    else:
+        topic_md = []
+    
+    topic_graph_add_metadata(graph, topic_md)
 
     if args.calculate_centrality:
         centrality = eigenvector_centrality(sim_matrix)
-
         topic_graph_view_centrality(graph, centrality, ['name'])
         
         # Sanity check against nx.eigenvector_centrality.
@@ -260,6 +269,19 @@ def topic_graph_controller(args):
         #nx_centrality = numpy.array([val for key, val in sorted(nx_centrality.items())])
         #nx_centrality /= nx_centrality.sum()
         #assert (numpy.abs(nx_centrality - centrality) < 2 ** -12).all()
+
+    if args.write_markov_cluster_file is not None:
+        mcluster = markov_cluster(
+            sim_matrix, 
+            power=args.markov_cluster_power, 
+            inflate=args.markov_cluster_inflation, 
+            selfloop=args.markov_cluster_selfloop)
+        mcluster = mcluster.T
+        mcluster = networkx.DiGraph(mcluster)
+        topic_graph_add_metadata(mcluster, topic_md)
+        
+        filename = args.write_markov_cluster_file
+        topic_graph_save(mcluster, filename, args.output_type)
 
     if args.write_network_file is not None:
         filename = args.write_network_file
@@ -359,6 +381,11 @@ def cosine_similarity(A, B):
     # differently-normed dot products motivated my derivation of
     # the `browsing_similarity` below. 
 
+def cosine_similarity_normed(A, B):
+    cs = cosine_similarity(A, B)
+    norm = cs.sum(axis=0)[None:]
+    return cs / norm
+
 def browsing_similarity(A, B):
     '''Similar to cosine similarity, but with a different (asymmetrical)
        normalization scheme. The resulting matrix represents the probability
@@ -386,9 +413,10 @@ def browsing_similarity(A, B):
     norm = B.sum(axis=0)[None,:]
     return numpy.dot(A, B) / norm
 
-similarity_dispatcher = { 'cosine'   : cosine_similarity,
-                          'browsing' : browsing_similarity,
-                          'default'  : browsing_similarity }
+similarity_dispatcher = { 'cosine'        : cosine_similarity,
+                          'browsing'      : browsing_similarity,
+                          'cosine-normed' : cosine_similarity_normed,
+                          'default'       : browsing_similarity }
 
 def remove_self_loops(sim_matrix):
     sim_matrix = sim_matrix.copy()
@@ -460,6 +488,30 @@ def eigenvector_centrality(sim_matrix):
         cosine_sim_eig = cosine_similarity(pi_eig.T, old_eig)
 
     return pi_eig.ravel()
+
+def markov_cluster(sim_matrix, power=2, inflate=2, selfloop=0, eps=0):
+    sim_matrix = sim_matrix.copy()
+
+    # modulate self-loops:
+    di = numpy.diag_indices(sim_matrix.shape[0])
+    if (sim_matrix[di] == 0).all():
+        sim_matrix[di] = selfloop
+    else:
+        sim_matrix[di] = sim_matrix[di] * selfloop
+
+    col_norm = sim_matrix.sum(axis=0)[None,:]
+    col_norm[col_norm == 0] = 1  # avoids zero-divide but assumes all positive
+    sim_matrix /= col_norm
+    
+    curr = sim_matrix.copy() + 1
+    while (numpy.abs(sim_matrix - curr) > eps).any():
+        curr[:] = sim_matrix
+        sim_matrix = numpy.linalg.matrix_power(sim_matrix, power)
+        sim_matrix **= inflate
+        col_norm = sim_matrix.sum(axis=0)[None,:]
+        col_norm[col_norm == 0] = 1 # assumes all values positive
+        sim_matrix /= col_norm
+    return sim_matrix
 
 if __name__ == '__main__':
 
@@ -566,6 +618,23 @@ if __name__ == '__main__':
         'selected `--threshold-function`. A threshold of 0 preserves all '
         'links, which is the default behavior.')
 
+    graph_parser.add_argument('-W', '--write-markov-cluster-file', type=str,
+        metavar='filename', help='Create a clustered version of the graph '
+        'using the Markov Cluster Algorithm and write it to the given '
+        'filename.')
+    graph_parser.add_argument('-p', '--markov-cluster-power', type=int,
+        metavar='integer', default=2, help='The `power` parameter to use for '
+        'markov clustering. Larger values cause larger clusters to form.')
+    graph_parser.add_argument('-i', '--markov-cluster-inflation', type=float,
+        metavar='number', default=2.0, help='The `inflation` parameter to use '
+        'for markov clustering. Larger values cause smaller clusters to form.')
+    graph_parser.add_argument('-L', '--markov-cluster-selfloop', type=float,
+        metavar='number', default=0, help='The `selfloop` parameter to use '
+        'for markov clustering. Should be a value between 0.0 and 1.0. '
+        'higher values cause nodes to avoid joining clusters if possible. '
+        'If the `--remove-self-loops` option is selected, this value is '
+        'used as the weight for all self-loops; otherwise, the existing '
+        'self-loops are multiplied by this value.')
     graph_parser.add_argument('-c', '--calculate-centrality',
         action='store_true', default=False, help='If this option is '
         'used, the topics will be displayed ordered by their '
