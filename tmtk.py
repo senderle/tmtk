@@ -99,7 +99,7 @@ def parse_metadata(open_md_file):
 
         for line in md:
             fields = [f.strip() for f in line.split('\t')]
-            yield zip(fieldnames, fields)
+            yield list(zip(fieldnames, fields))
 
 def add_text_metadata(comp, open_md_file):
     '''Accepts a dictionary of document dictionaries (as created by
@@ -183,7 +183,7 @@ def shared_topic_view(texts, top, fields=None):
 
 def construct_doc_topic_matrix(texts):
     maxtopic = 0
-    random_t = next(texts.itervalues())
+    random_t = next(iter(texts.values()))
     while maxtopic in random_t:
         maxtopic += 1
 
